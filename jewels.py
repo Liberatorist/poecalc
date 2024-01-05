@@ -1,30 +1,36 @@
 import math
 import re
+import warnings
+from typing import TYPE_CHECKING, Optional, Tuple, no_type_check
 
-from data import timeless_node_mapping, TimelessJewelType, legion_passive_mapping
+if TYPE_CHECKING:
+	from stats import Stats
+
+from data import TimelessJewelType, legion_passive_mapping, timeless_node_mapping
 
 legion_passive_effects = legion_passive_mapping()
+
 notable_hashes_for_jewels = [
 	'26725', '36634', '33989', '41263', '60735', '61834', '31683', '28475', '6230', '48768', '34483', '7960',
 	'46882', '55190', '61419', '2491', '54127', '32763', '26196', '33631', '21984', '29712', '48679', '9408',
 	'12613', '16218', '2311', '22994', '40400', '46393', '61305', '12161', '3109', '49080', '17219', '44169',
 	'24970', '36931', '14993', '10532', '23756', '46519', '23984', '51198', '61666', '6910', '49684', '33753',
-	'18436', '11150', '22748', '64583', '61288', '13170', '9797', '41876', '59585'
+	'18436', '11150', '22748', '64583', '61288', '13170', '9797', '41876', '59585',
 ]
 
 
 class TreeGraph:
 	"""This class is used to determine the shortest paths between two passive skills in a given passive tree"""
-	def __init__(self, tree, skills):
+	def __init__(self, tree: dict, skills: dict):
 		# skills['hashes'] can contain hashes that are not part of the tree (cluster notables)
-		self.node_hashes = {str(hash) for hash in skills['hashes']} & \
-						   set(node_hash for node_hash in tree['nodes'] if node_hash != 'root')
+		skill_hashes = {str(hash) for hash in skills['hashes']}
+		self.node_hashes: set[str] = skill_hashes & {node_hash for node_hash in tree['nodes'] if node_hash != 'root'}
 		self.tree = tree
-		self.id_for_hash = {node: idx for idx, node in enumerate(self.node_hashes)}
-		self.adjacency_list = {node: set() for node in range(len(self.node_hashes))}
+		self.id_for_hash: dict[str, int] = {node: idx for idx, node in enumerate(self.node_hashes)}
+		self.adjacency_list: dict[int, set] = {node: set() for node in range(len(self.node_hashes))}
 		self.fill_adjacency_list()
 
-	def fill_adjacency_list(self):
+	def fill_adjacency_list(self) -> None:
 		for idx, node_hash in enumerate(self.node_hashes):
 			node = self.tree['nodes'].get(node_hash)
 			if node is None:
@@ -32,17 +38,16 @@ class TreeGraph:
 			for neighbour_hash in ((set(node.get('in', [])) | set(node.get('out', []))) & self.node_hashes):
 				self.add_edge(idx, self.id_for_hash[neighbour_hash])
 
-	def add_edge(self, node1, node2):
+	def add_edge(self, node1: int, node2: int) -> None:
 		self.adjacency_list[node1].add(node2)
 		self.adjacency_list[node2].add(node1)
 
-	def bfs(self, start_node_hash, target_node_hash):
+	def bfs(self, start_node_hash: str, target_node_hash: str) -> float:
 		start_node = self.id_for_hash[start_node_hash]
 		target_node = self.id_for_hash[target_node_hash]
 		queue = [start_node]
 		visited = {start_node}
-		parent = dict()
-		parent[start_node] = None
+		parent: dict[int, Optional[int]] = {start_node: None}
 		path_found = False
 		while queue:
 			current_node = queue.pop(0)
@@ -59,11 +64,11 @@ class TreeGraph:
 		path_length = 0
 		while parent[target_node] is not None:
 			path_length += 1
-			target_node = parent[target_node]
+			target_node = parent[target_node]  # type: ignore[assignment]
 		return path_length
 
 
-def passive_node_coordinates(node: dict, tree: dict) -> (float, float):
+def passive_node_coordinates(node: dict, tree: dict) -> Tuple[float, float]:
 	if 'group' not in node:
 		raise ValueError(f'Cannot determine coordinates for passive node "{node}"')
 	orbit_radius = tree['constants']['orbitRadii'][node['orbit']]
@@ -94,10 +99,11 @@ def nodes_in_radius(middle_passive: dict, radius: int, tree: dict) -> set[int]:
 	return passive_hashes
 
 
-def get_radius(jewel, skills) -> int:
+def get_radius(jewel: dict, skills: dict) -> int:
 	return skills['jewel_data'][str(jewel['x'])]['radius']
 
 
+@no_type_check
 def scale_effect(initial_value: str, scaling_factor: float) -> str:
 	return str(int(int(initial_value) * scaling_factor))
 
@@ -106,7 +112,8 @@ def scale_numbers_in_string(string: str, scaling_factor: float) -> str:
 	return re.sub(r'(\d+)', lambda x: scale_effect(x.group(1), scaling_factor), string)
 
 
-def process_transforming_jewels(tree, skills, stats, character):
+def process_transforming_jewels(tree: dict, skills: dict, stats: 'Stats', character: dict) \
+		-> Tuple[dict, dict, 'Stats']:
 	jewel_priority = {
 		# Timeless jewels need to be processed first, since they block other jewels from modifying notables in radius
 		'Glorious Vanity': 1,
@@ -125,13 +132,14 @@ def process_transforming_jewels(tree, skills, stats, character):
 		# unnatural instinct needs to be processed last since it allocates, which can mess up split personality
 		'Unnatural Instinct': 4,
 	}
-	special_jewels = [(jewel, jewel_priority[jewel['name']]) for jewel in skills['items'] if jewel['name'] in jewel_priority]
+	special_jewels = [(j, jewel_priority[j['name']]) for j in skills['items'] if j['name'] in jewel_priority]
 	special_jewels.sort(key=lambda x: x[1])
 
 	for jewel, _ in special_jewels:
 		if jewel['typeLine'] == 'Timeless Jewel':
 			tree = process_timeless_jewel(jewel, tree, get_radius(jewel, skills))
-			stats.militant_faith_aura_effect = '1% increased effect of Non-Curse Auras per 10 Devotion' in jewel['explicitMods']
+			stats.militant_faith_aura_effect = \
+					'1% increased effect of Non-Curse Auras per 10 Devotion' in jewel['explicitMods']
 		elif jewel['name'] == 'Healthy Mind':
 			tree = process_healthy_mind(jewel, tree, get_radius(jewel, skills))
 		elif jewel['name'] == 'Split Personality':
@@ -139,7 +147,8 @@ def process_transforming_jewels(tree, skills, stats, character):
 		elif jewel['name'] == 'Might of the Meek':
 			tree = process_might_of_the_meek(jewel, tree, get_radius(jewel, skills))
 		elif jewel['name'] == 'Unnatural Instinct':
-			tree, skills['hashes'] = process_unnatural_instinct(jewel, tree, skills['hashes'], get_radius(jewel, skills))
+			tree, skills['hashes'] = process_unnatural_instinct(
+					jewel, tree, skills['hashes'], get_radius(jewel, skills))
 	return tree, skills, stats
 
 
@@ -169,7 +178,7 @@ def process_timeless_jewel(jewel_data: dict, tree: dict, radius: int) -> dict:
 
 
 alt_keystones = {
-	'Ahuana': "Immortal Ambition",
+	'Ahuana': 'Immortal Ambition',
 	'Doryani': 'Corrupted Soul',
 	'Xibaqua': 'Divine Flesh',
 	'Akoya': 'Chainbreaker',
@@ -183,12 +192,12 @@ alt_keystones = {
 	'Maxarius': 'Transcendence',
 	'Cadiro': 'Supreme Decadence',
 	'Caspiro': 'Supreme Ostentation',
-	'Victario': 'Supreme Grandstanding'
+	'Victario': 'Supreme Grandstanding',
 }
 
 
 class TimelessJewel:
-	def __init__(self, first_line):
+	def __init__(self, first_line: str):
 		if m := re.search(r'Bathed in the blood of (\d+) sacrificed in the name of (.*)', first_line):
 			self.jewel_type = TimelessJewelType.GLORIOUS_VANITY
 		elif m := re.search(r'Commissioned (\d+) coins to commemorate (.*)', first_line):
@@ -200,15 +209,15 @@ class TimelessJewel:
 		elif m := re.search(r'Denoted service of (\d+) dekhara in the akhara of (.*)', first_line):
 			self.jewel_type = TimelessJewelType.BRUTAL_RESTRAINT
 		else:
-			raise Exception("Timeless Jewel could not be parsed")
+			raise Exception('Timeless Jewel could not be parsed')
 		self.seed = int(m.group(1))
 		self.version = m.group(2)
 		self.mapping = timeless_node_mapping(self.seed, self.jewel_type)
 
-	def transform(self, node):
+	def transform(self, node: dict) -> None:
 		if node['name'].endswith('Mastery') or node.get('isJewelSocket') or node.get('classStartIndex'):
 			return
-		node["isConquered"] = True
+		node['isConquered'] = True
 		if node.get('isKeystone'):
 			self._transform_keystone(node)
 		elif node.get('isNotable'):
@@ -218,39 +227,42 @@ class TimelessJewel:
 		else:
 			self._transform_small_passive(node)
 
-	def _transform_notable(self, node):
-		alt_mods = self.mapping[node["skill"]]
-		if alt_mods["replaced"]:
-			node["stats"] = alt_mods["mods"]
+	def _transform_notable(self, node: dict) -> None:
+		if node['skill'] not in self.mapping:
+			warnings.warn(f'Node "{node["name"]}" in radius of Timeless Jewel could not be resolved')
+			return
+		alt_mods = self.mapping[node['skill']]
+		if alt_mods['replaced']:
+			node['stats'] = alt_mods['mods']
 		else:
-			node["stats"] += alt_mods["mods"]
+			node['stats'] += alt_mods['mods']
 
-	def _transform_keystone(self, node):
-		node["stats"] = legion_passive_effects[alt_keystones[self.version]]
+	def _transform_keystone(self, node: dict) -> None:
+		node['stats'] = legion_passive_effects[alt_keystones[self.version]]
 
-	def _transform_small_attribute(self, node):
+	def _transform_small_attribute(self, node: dict) -> None:
 		if self.jewel_type == TimelessJewelType.GLORIOUS_VANITY:
 			self._transform_notable(node)
 		elif self.jewel_type == TimelessJewelType.ELEGANT_HUBRIS:
-			node["stats"] = []
+			node['stats'] = []
 		elif self.jewel_type == TimelessJewelType.MILITANT_FAITH:
-			node["stats"] = ["+10 to Devotion"]
+			node['stats'] = ['+10 to Devotion']
 		elif self.jewel_type == TimelessJewelType.LETHAL_PRIDE:
-			node["stats"] += ["+2 to Strength"]
+			node['stats'] += ['+2 to Strength']
 		elif self.jewel_type == TimelessJewelType.BRUTAL_RESTRAINT:
-			node["stats"] = ["+2 to Dexterity"]
+			node['stats'] = ['+2 to Dexterity']
 
-	def _transform_small_passive(self, node):
+	def _transform_small_passive(self, node: dict) -> None:
 		if self.jewel_type == TimelessJewelType.GLORIOUS_VANITY:
 			self._transform_notable(node)
 		elif self.jewel_type == TimelessJewelType.ELEGANT_HUBRIS:
-			node["stats"] = []
+			node['stats'] = []
 		elif self.jewel_type == TimelessJewelType.MILITANT_FAITH:
-			node["stats"] += ["+5 to Devotion"]
+			node['stats'] += ['+5 to Devotion']
 		elif self.jewel_type == TimelessJewelType.LETHAL_PRIDE:
-			node["stats"] += ["+4 to Strength"]
+			node['stats'] += ['+4 to Strength']
 		elif self.jewel_type == TimelessJewelType.BRUTAL_RESTRAINT:
-			node["stats"] = ["+4 to Dexterity"]
+			node['stats'] = ['+4 to Dexterity']
 
 
 def process_healthy_mind(jewel_data: dict, tree: dict, radius: int) -> dict:
@@ -265,7 +277,7 @@ def process_healthy_mind(jewel_data: dict, tree: dict, radius: int) -> dict:
 			re.sub(
 				r'(\d+)% increased maximum Life',
 				lambda x: f'{scale_effect(x.group(1), 2)}% increased maximum Mana',
-				stat
+				stat,
 			) for stat in node['stats']
 		]
 	return tree
@@ -288,14 +300,14 @@ def process_might_of_the_meek(jewel_data: dict, tree: dict, radius: int) -> dict
 	return tree
 
 
-def class_starting_nodes(tree, character, skills) -> set:
+def class_starting_nodes(tree: dict, character: dict, skills: dict) -> set[str]:
 	for node in tree['nodes'].values():
 		if node.get('classStartIndex') == character['character']['classId']:
 			return {str(h) for h in skills['hashes']} & (set(node['in']) | set(node['out']))
 	return set()
 
 
-def get_cluster_root(jewel_hash, tree) -> tuple[str, int]:
+def get_cluster_root(jewel_hash: str, tree: dict) -> tuple[str, int]:
 	"""
 	Returns the hash for the root cluster jewel slot, if the jewel is in a cluster slot and its distance from it
 	Assumptions:
@@ -314,7 +326,7 @@ def get_cluster_root(jewel_hash, tree) -> tuple[str, int]:
 	return str(jewel['skill']), additional_distance
 
 
-def process_split_personality(jewel_data: dict, tree: dict, skills: dict, character):
+def process_split_personality(jewel_data: dict, tree: dict, skills: dict, character: dict) -> dict:
 	jewel_hash = notable_hashes_for_jewels[jewel_data['x']]
 	jewel_hash, additional_distance = get_cluster_root(jewel_hash, tree)
 	g = TreeGraph(tree, skills)
@@ -328,7 +340,7 @@ def process_split_personality(jewel_data: dict, tree: dict, skills: dict, charac
 	return jewel_data
 
 
-def process_abyss_jewels(item: dict):
+def process_abyss_jewels(item: dict) -> list[str]:
 	mods = []
 	for jewel in item.get('socketedItems', []):
 		if not jewel.get('abyssJewel'):
@@ -339,5 +351,5 @@ def process_abyss_jewels(item: dict):
 			scaling = 1
 		for mod_type in ['explicitMods', 'implicitMods', 'fracturedMods']:
 			for mod in jewel.get(mod_type, []):
-				mods.append(re.sub(r'(\d+)', lambda x, sc=scaling: scale_effect(x.group(), sc), mod))
+				mods.append(re.sub(r'(\d+)', lambda x, sc=scaling: scale_effect(x.group(), sc), mod))  # type: ignore
 	return mods

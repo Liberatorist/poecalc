@@ -1,20 +1,17 @@
-import csv
+import io
 import json
 import math
 import re
 import warnings
 import zipfile
-import io
-import os
 from enum import Enum
-
 
 def load() -> tuple[dict[str, dict], dict, dict]:
 	with open('data/gems.json', 'rb') as f:
 		raw_gems: dict[str, dict] = json.load(f)
 	gems: dict[str, dict] = {}
 	for k, v in raw_gems.items():
-		if k.endswith('Royale') or k.endswith('Triggered'):
+		if k.endswith(('Royale', 'Triggered')):
 			continue
 		if v['base_item']:
 			gems[v['base_item']['display_name']] = v
@@ -31,9 +28,18 @@ def load() -> tuple[dict[str, dict], dict, dict]:
 			if any(translated['string'].startswith(prefix + ' ') for prefix in prefixes):
 				aura_translation[k] = translation['English']
 
+	with open('data/buff_skill.json', 'rb') as f:
+		raw_text = json.load(f)
+	substrings = ['Link Skill', 'Linked Target', 'taken from your Energy']
+	for translation in raw_text:
+		for k in translation['ids']:
+			translated = translation['English'][0]
+			if any(substring.lower() in translated['string'].lower() for substring in substrings):
+				aura_translation[k] = translation['English']
+
 	curse_translation: dict[str, str] = {}
 	with open('data/curse_skill.json', 'rb') as f:
-		raw_text: list[dict] = json.load(f)
+		raw_text = json.load(f)
 		identifiers = ['cursed enemies', 'cursed rare']
 		for translation in raw_text:
 			for k in translation['ids']:
@@ -47,7 +53,7 @@ def load() -> tuple[dict[str, dict], dict, dict]:
 def legion_passive_mapping() -> dict:
 	""" Maps names of timeless legion passives to their effects """
 	# I couldn't find any of this info in the RePoE data, so I'm grabbing it from the path of building repo
-	with open('data/LegionPassives.lua', 'r') as file:
+	with open('data/LegionPassives.lua', 'r', encoding='utf8') as file:
 		content = file.read()
 		content = re.sub(r'\[(\d+)\] =', r'["\1"] =', content)  # turns integer keys into strings
 		content = re.sub(r',\s+}', r'}', content)  # removes commas after the last key value pairs
@@ -57,86 +63,61 @@ def legion_passive_mapping() -> dict:
 
 
 class TimelessJewelType(Enum):
-	GLORIOUS_VANITY = "glorious_vanity"
-	LETHAL_PRIDE = "lethal_pride"
-	BRUTAL_RESTRAINT = "brutal_restraint"
-	MILITANT_FAITH = "militant_faith"
-	ELEGANT_HUBRIS = "elegant_hubris"
+	GLORIOUS_VANITY = 'glorious_vanity'
+	LETHAL_PRIDE = 'lethal_pride'
+	BRUTAL_RESTRAINT = 'brutal_restraint'
+	MILITANT_FAITH = 'militant_faith'
+	ELEGANT_HUBRIS = 'elegant_hubris'
 
 
 def timeless_node_mapping(seed: int, jewel_type: TimelessJewelType) -> dict:
 	with zipfile.ZipFile(f'data/TimelessJewels/{jewel_type.value}.zip') as archive:
 		with archive.open(f'{seed}.csv', 'r') as infile:
 			alt_passives = [
-				[value for value in line.split(",")] for line in io.TextIOWrapper(infile, 'utf-8').read().split("\n")
+				line.split(',') for line in io.TextIOWrapper(infile, 'utf-8').read().split('\n')
 			]
 
-	with open(f"data/TimelessJewels/{jewel_type.value}_passives.txt", "r") as file:
-		passives = [int(line) for line in file.read().split("\n") if line != ""]
+	with open(f'data/TimelessJewels/{jewel_type.value}_passives.txt', 'r', encoding='utf8') as file:
+		passives = [int(line) for line in file.read().split('\n') if line != '']
 
-	with open(f"data/TimelessJewels/stats.txt", "r") as file:
-		stats = [line for line in file.read().split("\n") if line != ""]
+	with open('data/TimelessJewels/stats.txt', 'r', encoding='utf8') as file:
+		stats = [line for line in file.read().split('\n') if line != '']
 
 	list_of_stats = set()
-	mapping = dict()
+	mapping: dict[int, dict] = {}
 	for p, ap in zip(passives, alt_passives):
-		if ap == [""]:
+		if ap == ['']:
 			continue
 		mods = []
 		for i in range(1, len(ap), 2):
 			list_of_stats.add(stats[int(ap[i])])
 			mods.append((stats[int(ap[i])], int(ap[i + 1])))
-		mapping[p] = {"replaced": bool(int(ap[0])), "mods": mods}
+		mapping[p] = {'replaced': bool(int(ap[0])), 'mods': mods}
 
-	with open("data/passive_skill.json", "r") as file:
+	with open('data/passive_skill.json', 'r', encoding='utf8') as file:
 		data = json.loads(file.read())
-		stat_map = dict()
+		stat_map = {}
 		for stat in list_of_stats:
 			for skill in data:
-				if stat in skill["ids"]:
-					stat_map[stat] = skill["English"]
+				if stat in skill['ids']:
+					stat_map[stat] = skill['English']
 					break
 
 	for alt_passive in mapping.values():
 		resolved_mods = []
-		for mod in alt_passive["mods"]:
+		for mod in alt_passive['mods']:
 			for translation in stat_map[mod[0]]:
 				condition = translation['condition'][0]
 				if condition == {} or condition.get('max', math.inf) >= mod[1] >= condition.get('min', -math.inf):
 					break
 			else:
-				warnings.warn(f"Could not resolve mod {mod}")
-			form = translation["format"][0]
-			if form == "ignore":
-				resolved_mods.append(translation["string"])
+				warnings.warn(f'Could not resolve mod {mod}')
+				continue
+			form = translation['format'][0]
+			if form == 'ignore':
+				resolved_mods.append(translation['string'])
 			else:
-				resolved_mods.append(translation["string"].format(form.replace("#", str(mod[1]))))
-		alt_passive["mods"] = resolved_mods
+				resolved_mods.append(translation['string'].format(form.replace('#', str(mod[1]))))
+		alt_passive['mods'] = resolved_mods
 
 	return mapping
-
-
-def militant_faith_node_mapping(seed: str) -> dict:
-	""" Maps passives nodes to their alternative nodes under militant faith"""
-	with zipfile.ZipFile(r'data/MilitantFaithSeeds.zip') as zf:
-		with zf.open('MilitantFaithSeeds.csv', 'r') as infile:
-			reader = csv.reader(io.TextIOWrapper(infile, 'utf-8'))
-			originals = next(reader)[2:]
-			for row in reader:
-				if row[0] == seed:
-					alternatives = row[2:]
-					break
-		return {original: alternative for original, alternative in zip(originals, alternatives)}
-
-
-def elegant_hubris_node_mapping(seed: str) -> dict:
-	""" Maps passives nodes to their alternative nodes under elegant hubris"""
-	with zipfile.ZipFile(r'data/ElegantHubrisSeeds.zip') as zf:
-		with zf.open('ElegantHubrisSeeds.csv', 'r') as infile:
-			reader = csv.reader(io.TextIOWrapper(infile, 'utf-8'))
-			originals = next(reader)[2:]
-			for row in reader:
-				if row[0] == seed:
-					alternatives = row[2:]
-					break
-	return {original: alternative for original, alternative in zip(originals, alternatives)}
